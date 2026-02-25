@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Fetch Reya market definitions, export OI data to CSV, and serve a small web table."""
+"""Reya OI exporter + small website.
+
+- CLI mode (default): fetch API data and write reya_oi_caps.csv
+- Website mode (--serve): render the CSV/API data in a table
+"""
 
 from __future__ import annotations
 
@@ -11,65 +15,11 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
-from flask import Flask, Response, render_template_string, request
+from flask import Flask, Response, jsonify, render_template, request
 import requests
 
 API_URL = "https://api.reya.xyz/v2/marketDefinitions"
 OUTPUT_CSV = Path("reya_oi_caps.csv")
-
-HTML_TEMPLATE = """
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Reya OI dashboard</title>
-    <style>
-      body { font-family: Arial, sans-serif; margin: 2rem; color: #1f2937; }
-      h1 { margin-bottom: 0.25rem; }
-      .meta { margin: 0.25rem 0 1rem; color: #4b5563; }
-      table { border-collapse: collapse; width: 100%; max-width: 1000px; }
-      th, td { border: 1px solid #d1d5db; padding: 0.5rem 0.75rem; text-align: left; }
-      th { background: #f3f4f6; }
-      .actions { margin: 1rem 0; }
-      .error { color: #b91c1c; margin-top: 0.5rem; }
-      code { background: #f3f4f6; padding: 0.1rem 0.3rem; border-radius: 0.25rem; }
-    </style>
-  </head>
-  <body>
-    <h1>Reya OI dashboard</h1>
-    <p class="meta">Sorted ascending by <code>oiCap</code>. Total markets: {{ rows|length }}.</p>
-    <div class="actions">
-      <a href="/?refresh=1">Refresh data</a>
-      {% if fetched_at_utc %}<span> · fetched_at_utc: <code>{{ fetched_at_utc }}</code></span>{% endif %}
-      {% if source %}<span> · source: <code>{{ source }}</code></span>{% endif %}
-    </div>
-    {% if error %}<p class="error">{{ error }}</p>{% endif %}
-    <table>
-      <thead>
-        <tr>
-          <th>#</th>
-          <th>Market</th>
-          <th>current_oi</th>
-          <th>oiCap</th>
-          <th>fetched_at_utc</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for row in rows %}
-        <tr>
-          <td>{{ loop.index }}</td>
-          <td>{{ row.market }}</td>
-          <td>{{ row.current_oi }}</td>
-          <td>{{ row.oiCap }}</td>
-          <td>{{ row.fetched_at_utc }}</td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </body>
-</html>
-"""
 
 
 @dataclass
@@ -111,7 +61,8 @@ def market_name(market: dict[str, Any], idx: int) -> str:
 
 
 def extract_current_oi(market: dict[str, Any]) -> Decimal | None:
-    direct_fields = (
+    # Likely fields for current open interest in Reya payload variants.
+    candidates = (
         "currentOi",
         "current_oi",
         "openInterest",
@@ -120,19 +71,19 @@ def extract_current_oi(market: dict[str, Any]) -> Decimal | None:
         "currentOpenInterest",
         "totalOpenInterest",
     )
-    for field in direct_fields:
-        oi_value = as_decimal(market.get(field))
-        if oi_value is not None:
-            return oi_value
+    for field in candidates:
+        oi = as_decimal(market.get(field))
+        if oi is not None:
+            return oi
 
-    nested_sources = [market.get("stats"), market.get("metrics")]
-    for source in nested_sources:
-        if not isinstance(source, dict):
+    for nested_key in ("stats", "metrics"):
+        nested = market.get(nested_key)
+        if not isinstance(nested, dict):
             continue
-        for field in direct_fields:
-            oi_value = as_decimal(source.get(field))
-            if oi_value is not None:
-                return oi_value
+        for field in candidates:
+            oi = as_decimal(nested.get(field))
+            if oi is not None:
+                return oi
 
     long_oi = as_decimal(market.get("longOi")) or as_decimal(market.get("long_oi"))
     short_oi = as_decimal(market.get("shortOi")) or as_decimal(market.get("short_oi"))
@@ -170,10 +121,7 @@ def fetch_rows() -> ExportResult:
 
 def write_csv(rows: list[dict[str, str]], fetched_at_utc: str, output_csv: Path = OUTPUT_CSV) -> None:
     with output_csv.open("w", newline="", encoding="utf-8") as csv_file:
-        writer = csv.DictWriter(
-            csv_file,
-            fieldnames=["market", "current_oi", "oiCap", "fetched_at_utc"],
-        )
+        writer = csv.DictWriter(csv_file, fieldnames=["market", "current_oi", "oiCap", "fetched_at_utc"])
         writer.writeheader()
         for row in rows:
             writer.writerow(
@@ -205,12 +153,38 @@ def read_csv_rows(output_csv: Path = OUTPUT_CSV) -> ExportResult:
 def export_to_csv() -> ExportResult:
     result = fetch_rows()
     write_csv(result.rows, result.fetched_at_utc)
+
     print(f"Saved {len(result.rows)} markets to {OUTPUT_CSV}")
     print("10 lowest oiCap markets:")
     for row in result.rows[:10]:
-        current = row["current_oi"] if row["current_oi"] else "n/a"
+        current = row["current_oi"] or "n/a"
         print(f"- {row['market']}: oiCap={row['oiCap']}, current_oi={current}")
+
     return result
+
+
+def load_for_view(refresh: bool) -> tuple[ExportResult, str, str]:
+    error = ""
+    source = ""
+
+    if refresh or not OUTPUT_CSV.exists():
+        try:
+            result = export_to_csv()
+            source = "live API"
+        except Exception as exc:  # noqa: BLE001
+            if OUTPUT_CSV.exists():
+                result = read_csv_rows()
+                source = "cached CSV"
+                error = f"Live refresh failed, showing cached CSV: {exc}"
+            else:
+                result = ExportResult(rows=[], fetched_at_utc="")
+                source = "none"
+                error = f"Live refresh failed and no cached CSV exists: {exc}"
+    else:
+        result = read_csv_rows()
+        source = "cached CSV"
+
+    return result, source, error
 
 
 def build_app() -> Flask:
@@ -219,33 +193,26 @@ def build_app() -> Flask:
     @app.get("/")
     def index() -> str:
         refresh = request.args.get("refresh") == "1"
-        error = ""
-        source = ""
-
-        if refresh or not OUTPUT_CSV.exists():
-            try:
-                result = export_to_csv()
-                source = "live API"
-            except Exception as exc:  # noqa: BLE001
-                if OUTPUT_CSV.exists():
-                    result = read_csv_rows()
-                    source = "cached CSV"
-                    error = f"Live refresh failed, showing cached CSV: {exc}"
-                else:
-                    result = ExportResult(rows=[], fetched_at_utc="")
-                    source = "none"
-                    error = f"Live refresh failed and no cached CSV exists: {exc}"
-        else:
-            result = read_csv_rows()
-            source = "cached CSV"
-
-        return render_template_string(
-            HTML_TEMPLATE,
+        result, source, error = load_for_view(refresh)
+        return render_template(
+            "index.html",
             rows=result.rows,
             fetched_at_utc=result.fetched_at_utc,
             source=source,
             error=error,
         )
+
+    @app.get("/api/markets")
+    def api_markets() -> Response:
+        refresh = request.args.get("refresh") == "1"
+        result, source, error = load_for_view(refresh)
+        payload = {
+            "source": source,
+            "error": error,
+            "fetched_at_utc": result.fetched_at_utc,
+            "rows": result.rows,
+        }
+        return jsonify(payload)
 
     @app.get("/healthz")
     def healthz() -> Response:
@@ -255,8 +222,8 @@ def build_app() -> Flask:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Export Reya OI values and optionally serve a web table")
-    parser.add_argument("--serve", action="store_true", help="Run a local web server with a table of OI caps")
+    parser = argparse.ArgumentParser(description="Export Reya OI data and optionally serve a website")
+    parser.add_argument("--serve", action="store_true", help="Run a local website with an OI table")
     parser.add_argument("--host", default="127.0.0.1", help="Host for --serve mode")
     parser.add_argument("--port", type=int, default=8000, help="Port for --serve mode")
     return parser.parse_args()
