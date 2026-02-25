@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fetch Reya market definitions, export OI caps to CSV, and serve a small web table."""
+"""Fetch Reya market definitions, export OI data to CSV, and serve a small web table."""
 
 from __future__ import annotations
 
@@ -23,12 +23,12 @@ HTML_TEMPLATE = """
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Reya OI caps</title>
+    <title>Reya OI dashboard</title>
     <style>
       body { font-family: Arial, sans-serif; margin: 2rem; color: #1f2937; }
       h1 { margin-bottom: 0.25rem; }
       .meta { margin: 0.25rem 0 1rem; color: #4b5563; }
-      table { border-collapse: collapse; width: 100%; max-width: 900px; }
+      table { border-collapse: collapse; width: 100%; max-width: 1000px; }
       th, td { border: 1px solid #d1d5db; padding: 0.5rem 0.75rem; text-align: left; }
       th { background: #f3f4f6; }
       .actions { margin: 1rem 0; }
@@ -37,7 +37,7 @@ HTML_TEMPLATE = """
     </style>
   </head>
   <body>
-    <h1>Reya OI caps</h1>
+    <h1>Reya OI dashboard</h1>
     <p class="meta">Sorted ascending by <code>oiCap</code>. Total markets: {{ rows|length }}.</p>
     <div class="actions">
       <a href="/?refresh=1">Refresh data</a>
@@ -50,6 +50,7 @@ HTML_TEMPLATE = """
         <tr>
           <th>#</th>
           <th>Market</th>
+          <th>current_oi</th>
           <th>oiCap</th>
           <th>fetched_at_utc</th>
         </tr>
@@ -59,6 +60,7 @@ HTML_TEMPLATE = """
         <tr>
           <td>{{ loop.index }}</td>
           <td>{{ row.market }}</td>
+          <td>{{ row.current_oi }}</td>
           <td>{{ row.oiCap }}</td>
           <td>{{ row.fetched_at_utc }}</td>
         </tr>
@@ -108,6 +110,38 @@ def market_name(market: dict[str, Any], idx: int) -> str:
     return f"market_{idx}"
 
 
+def extract_current_oi(market: dict[str, Any]) -> Decimal | None:
+    direct_fields = (
+        "currentOi",
+        "current_oi",
+        "openInterest",
+        "open_interest",
+        "oi",
+        "currentOpenInterest",
+        "totalOpenInterest",
+    )
+    for field in direct_fields:
+        oi_value = as_decimal(market.get(field))
+        if oi_value is not None:
+            return oi_value
+
+    nested_sources = [market.get("stats"), market.get("metrics")]
+    for source in nested_sources:
+        if not isinstance(source, dict):
+            continue
+        for field in direct_fields:
+            oi_value = as_decimal(source.get(field))
+            if oi_value is not None:
+                return oi_value
+
+    long_oi = as_decimal(market.get("longOi")) or as_decimal(market.get("long_oi"))
+    short_oi = as_decimal(market.get("shortOi")) or as_decimal(market.get("short_oi"))
+    if long_oi is not None and short_oi is not None:
+        return long_oi + short_oi
+
+    return None
+
+
 def fetch_rows() -> ExportResult:
     response = requests.get(API_URL, timeout=30)
     response.raise_for_status()
@@ -119,7 +153,15 @@ def fetch_rows() -> ExportResult:
         oi_cap = as_decimal(market.get("oiCap"))
         if oi_cap is None:
             continue
-        rows.append({"market": market_name(market, idx), "oiCap": format(oi_cap, "f")})
+
+        current_oi = extract_current_oi(market)
+        rows.append(
+            {
+                "market": market_name(market, idx),
+                "current_oi": "" if current_oi is None else format(current_oi, "f"),
+                "oiCap": format(oi_cap, "f"),
+            }
+        )
 
     rows.sort(key=lambda row: Decimal(row["oiCap"]))
     fetched_at_utc = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -128,12 +170,16 @@ def fetch_rows() -> ExportResult:
 
 def write_csv(rows: list[dict[str, str]], fetched_at_utc: str, output_csv: Path = OUTPUT_CSV) -> None:
     with output_csv.open("w", newline="", encoding="utf-8") as csv_file:
-        writer = csv.DictWriter(csv_file, fieldnames=["market", "oiCap", "fetched_at_utc"])
+        writer = csv.DictWriter(
+            csv_file,
+            fieldnames=["market", "current_oi", "oiCap", "fetched_at_utc"],
+        )
         writer.writeheader()
         for row in rows:
             writer.writerow(
                 {
                     "market": row["market"],
+                    "current_oi": row["current_oi"],
                     "oiCap": row["oiCap"],
                     "fetched_at_utc": fetched_at_utc,
                 }
@@ -144,7 +190,12 @@ def read_csv_rows(output_csv: Path = OUTPUT_CSV) -> ExportResult:
     with output_csv.open("r", newline="", encoding="utf-8") as csv_file:
         reader = csv.DictReader(csv_file)
         rows = [
-            {"market": row.get("market", ""), "oiCap": row.get("oiCap", ""), "fetched_at_utc": row.get("fetched_at_utc", "")}
+            {
+                "market": row.get("market", ""),
+                "current_oi": row.get("current_oi", ""),
+                "oiCap": row.get("oiCap", ""),
+                "fetched_at_utc": row.get("fetched_at_utc", ""),
+            }
             for row in reader
         ]
     fetched_at_utc = rows[0]["fetched_at_utc"] if rows else ""
@@ -157,7 +208,8 @@ def export_to_csv() -> ExportResult:
     print(f"Saved {len(result.rows)} markets to {OUTPUT_CSV}")
     print("10 lowest oiCap markets:")
     for row in result.rows[:10]:
-        print(f"- {row['market']}: {row['oiCap']}")
+        current = row["current_oi"] if row["current_oi"] else "n/a"
+        print(f"- {row['market']}: oiCap={row['oiCap']}, current_oi={current}")
     return result
 
 
@@ -203,7 +255,7 @@ def build_app() -> Flask:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Export Reya oiCap values and optionally serve a web table")
+    parser = argparse.ArgumentParser(description="Export Reya OI values and optionally serve a web table")
     parser.add_argument("--serve", action="store_true", help="Run a local web server with a table of OI caps")
     parser.add_argument("--host", default="127.0.0.1", help="Host for --serve mode")
     parser.add_argument("--port", type=int, default=8000, help="Port for --serve mode")
