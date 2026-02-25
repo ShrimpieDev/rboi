@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Reya OI Dashboard</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #f8fafc;
+        --card: #ffffff;
+        --text: #0f172a;
+        --muted: #475569;
+        --border: #e2e8f0;
+        --accent: #2563eb;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #020617;
+          --card: #0f172a;
+          --text: #e2e8f0;
+          --muted: #94a3b8;
+          --border: #1e293b;
+          --accent: #60a5fa;
+        }
+      }
+      body {
+        font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+      }
+      main {
+        max-width: 1200px;
+        margin: 2rem auto;
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 1.25rem;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+      }
+      h1 { margin: 0; font-size: 1.5rem; }
+      .sub { color: var(--muted); margin-top: 0.25rem; }
+      .toolbar {
+        display: flex;
+        gap: 0.75rem;
+        align-items: center;
+        margin: 1rem 0;
+        flex-wrap: wrap;
+      }
+      .btn {
+        background: var(--accent);
+        color: white;
+        text-decoration: none;
+        border-radius: 8px;
+        padding: 0.5rem 0.75rem;
+        font-size: 0.9rem;
+        border: none;
+        cursor: pointer;
+      }
+      .btn.secondary {
+        background: transparent;
+        color: var(--text);
+        border: 1px solid var(--border);
+      }
+      .pill {
+        border: 1px solid var(--border);
+        color: var(--muted);
+        border-radius: 999px;
+        padding: 0.25rem 0.6rem;
+        font-size: 0.8rem;
+      }
+      .filters {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 0.75rem;
+        margin: 1rem 0;
+        padding: 0.75rem;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+      }
+      .field { display: flex; flex-direction: column; gap: 0.3rem; }
+      .field label { font-size: 0.8rem; color: var(--muted); }
+      .field input {
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 0.45rem 0.5rem;
+        background: transparent;
+        color: inherit;
+      }
+      table { width: 100%; border-collapse: collapse; }
+      th, td {
+        text-align: left;
+        padding: 0.5rem;
+        border-bottom: 1px solid var(--border);
+      }
+      th { color: var(--muted); font-weight: 600; }
+      .empty { text-align: center; color: var(--muted); padding: 1rem; }
+      .error { color: #ef4444; margin-top: 0.5rem; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Reya OI Dashboard</h1>
+      <p class="sub">All pairs fetched from Reya market definitions. Use filters to narrow results.</p>
+
+      <div class="toolbar">
+        <a class="btn" href="/?refresh=1">Refresh from API</a>
+        <span class="pill">source: {{ source }}</span>
+        <span class="pill">shown: {{ filtered_rows }}</span>
+        <span class="pill">total: {{ total_rows }}</span>
+        {% if fetched_at_utc %}<span class="pill">fetched_at_utc: {{ fetched_at_utc }}</span>{% endif %}
+      </div>
+
+      <form method="get" class="filters">
+        <div class="field">
+          <label for="market">Market contains</label>
+          <input id="market" name="market" type="text" value="{{ filters.market }}" placeholder="e.g. BTC" />
+        </div>
+        <div class="field">
+          <label for="min_oi_cap">Min OI Cap</label>
+          <input id="min_oi_cap" name="min_oi_cap" type="text" value="{{ filters.min_oi_cap }}" placeholder="0" />
+        </div>
+        <div class="field">
+          <label for="max_oi_cap">Max OI Cap</label>
+          <input id="max_oi_cap" name="max_oi_cap" type="text" value="{{ filters.max_oi_cap }}" placeholder="1000000" />
+        </div>
+        <div class="field">
+          <label for="min_current_oi">Min Current OI</label>
+          <input id="min_current_oi" name="min_current_oi" type="text" value="{{ filters.min_current_oi }}" placeholder="0" />
+        </div>
+        <div class="field">
+          <label for="max_current_oi">Max Current OI</label>
+          <input id="max_current_oi" name="max_current_oi" type="text" value="{{ filters.max_current_oi }}" placeholder="1000000" />
+        </div>
+        <div class="field" style="justify-content:end;">
+          <label>&nbsp;</label>
+          <div style="display:flex; gap:0.5rem;">
+            <button class="btn" type="submit">Apply filters</button>
+            <a class="btn secondary" href="/">Reset</a>
+          </div>
+        </div>
+      </form>
+
+      {% if error %}<p class="error">{{ error }}</p>{% endif %}
+
+      <table>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Market</th>
+            <th>Current OI</th>
+            <th>OI Cap</th>
+            <th>Fetched (UTC)</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% if rows %}
+            {% for row in rows %}
+              <tr>
+                <td>{{ loop.index }}</td>
+                <td>{{ row.market }}</td>
+                <td>{{ row.current_oi or "n/a" }}</td>
+                <td>{{ row.oiCap }}</td>
+                <td>{{ row.fetched_at_utc }}</td>
+              </tr>
+            {% endfor %}
+          {% else %}
+            <tr><td class="empty" colspan="5">No rows match your filters.</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </main>
+  </body>
+</html>
