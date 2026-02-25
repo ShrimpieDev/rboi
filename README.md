@@ -4,8 +4,8 @@
 
 This project includes a Python 3.10+ tool that can:
 
-1. fetch Reya market data and export `reya_oi_caps.csv`
-2. run a local website that shows OI data in a table
+1. fetch **all Reya market pairs** and export `reya_oi_caps.csv`
+2. run a local website that shows all rows with filter controls
 
 ## Requirements
 
@@ -23,6 +23,10 @@ Open <http://localhost:8000>.
 
 - Click **Refresh from API** (or use `/?refresh=1`) to pull fresh data.
 - The UI shows each market with `current_oi`, `oiCap`, and `fetched_at_utc`.
+- Filter by:
+  - market substring (`market`)
+  - min/max `oiCap` (`min_oi_cap`, `max_oi_cap`)
+  - min/max `current_oi` (`min_current_oi`, `max_current_oi`)
 - If live refresh fails, the app falls back to cached `reya_oi_caps.csv` if present.
 
 ### JSON API for the website
@@ -30,6 +34,7 @@ Open <http://localhost:8000>.
 ```text
 GET /api/markets
 GET /api/markets?refresh=1
+GET /api/markets?market=BTC&min_oi_cap=1000&max_oi_cap=5000000
 ```
 
 ## Run as CSV exporter only
@@ -45,7 +50,7 @@ This writes `reya_oi_caps.csv` with columns:
 - `oiCap`
 - `fetched_at_utc`
 
-The CLI prints the 10 markets with the lowest `oiCap`.
+The CLI fetches and saves all pairs.
 
 ## Reference
 

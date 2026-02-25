@@ -2,7 +2,7 @@
 """Reya OI exporter + small website.
 
 - CLI mode (default): fetch API data and write reya_oi_caps.csv
-- Website mode (--serve): render the CSV/API data in a table
+- Website mode (--serve): render the CSV/API data in a table with filters
 """
 
 from __future__ import annotations
@@ -61,7 +61,6 @@ def market_name(market: dict[str, Any], idx: int) -> str:
 
 
 def extract_current_oi(market: dict[str, Any]) -> Decimal | None:
-    # Likely fields for current open interest in Reya payload variants.
     candidates = (
         "currentOi",
         "current_oi",
@@ -114,7 +113,7 @@ def fetch_rows() -> ExportResult:
             }
         )
 
-    rows.sort(key=lambda row: Decimal(row["oiCap"]))
+    rows.sort(key=lambda row: row["market"].lower())
     fetched_at_utc = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     return ExportResult(rows=rows, fetched_at_utc=fetched_at_utc)
 
@@ -155,12 +154,47 @@ def export_to_csv() -> ExportResult:
     write_csv(result.rows, result.fetched_at_utc)
 
     print(f"Saved {len(result.rows)} markets to {OUTPUT_CSV}")
-    print("10 lowest oiCap markets:")
-    for row in result.rows[:10]:
-        current = row["current_oi"] or "n/a"
-        print(f"- {row['market']}: oiCap={row['oiCap']}, current_oi={current}")
-
+    print("Fetched all pairs with oiCap/current_oi.")
     return result
+
+
+def parse_decimal_arg(name: str) -> Decimal | None:
+    raw = request.args.get(name, "").strip()
+    if not raw:
+        return None
+    try:
+        return Decimal(raw)
+    except InvalidOperation:
+        return None
+
+
+def apply_filters(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    market_query = request.args.get("market", "").strip().lower()
+    min_oi_cap = parse_decimal_arg("min_oi_cap")
+    max_oi_cap = parse_decimal_arg("max_oi_cap")
+    min_current_oi = parse_decimal_arg("min_current_oi")
+    max_current_oi = parse_decimal_arg("max_current_oi")
+
+    filtered: list[dict[str, str]] = []
+    for row in rows:
+        if market_query and market_query not in row["market"].lower():
+            continue
+
+        oi_cap_value = as_decimal(row["oiCap"])
+        current_oi_value = as_decimal(row["current_oi"])
+
+        if min_oi_cap is not None and (oi_cap_value is None or oi_cap_value < min_oi_cap):
+            continue
+        if max_oi_cap is not None and (oi_cap_value is None or oi_cap_value > max_oi_cap):
+            continue
+        if min_current_oi is not None and (current_oi_value is None or current_oi_value < min_current_oi):
+            continue
+        if max_current_oi is not None and (current_oi_value is None or current_oi_value > max_current_oi):
+            continue
+
+        filtered.append(row)
+
+    return filtered
 
 
 def load_for_view(refresh: bool) -> tuple[ExportResult, str, str]:
@@ -194,23 +228,36 @@ def build_app() -> Flask:
     def index() -> str:
         refresh = request.args.get("refresh") == "1"
         result, source, error = load_for_view(refresh)
+        filtered_rows = apply_filters(result.rows)
         return render_template(
             "index.html",
-            rows=result.rows,
+            rows=filtered_rows,
+            total_rows=len(result.rows),
+            filtered_rows=len(filtered_rows),
             fetched_at_utc=result.fetched_at_utc,
             source=source,
             error=error,
+            filters={
+                "market": request.args.get("market", ""),
+                "min_oi_cap": request.args.get("min_oi_cap", ""),
+                "max_oi_cap": request.args.get("max_oi_cap", ""),
+                "min_current_oi": request.args.get("min_current_oi", ""),
+                "max_current_oi": request.args.get("max_current_oi", ""),
+            },
         )
 
     @app.get("/api/markets")
     def api_markets() -> Response:
         refresh = request.args.get("refresh") == "1"
         result, source, error = load_for_view(refresh)
+        filtered_rows = apply_filters(result.rows)
         payload = {
             "source": source,
             "error": error,
             "fetched_at_utc": result.fetched_at_utc,
-            "rows": result.rows,
+            "total_rows": len(result.rows),
+            "filtered_rows": len(filtered_rows),
+            "rows": filtered_rows,
         }
         return jsonify(payload)
 
@@ -223,7 +270,7 @@ def build_app() -> Flask:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Export Reya OI data and optionally serve a website")
-    parser.add_argument("--serve", action="store_true", help="Run a local website with an OI table")
+    parser.add_argument("--serve", action="store_true", help="Run a local website with OI table + filters")
     parser.add_argument("--host", default="127.0.0.1", help="Host for --serve mode")
     parser.add_argument("--port", type=int, default=8000, help="Port for --serve mode")
     return parser.parse_args()
